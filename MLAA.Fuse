@@ -1,0 +1,585 @@
+--[[--
+   MLAA.Fuse
+
+  Morphological anti-aliasing (MLAA) for Davinci Resolve.
+  Translated from https://www.shadertoy.com/view/cllXRB
+
+--]]--
+
+
+FuRegisterClass('MLAA', CT_Tool, {
+    REGS_Category = "Color",
+    REGS_OpIconString = '',
+    REGS_OpDescription = 'Morphological anti-aliasing (MLAA) for Davinci Resolve',
+    REG_OpNoMask = true,
+    REG_NoBlendCtrls = true,
+    REG_NoObjMatCtrls = true,
+    REG_NoMotionBlurCtrls = true,
+    REG_Source_GlobalCtrls = true,
+    REG_Source_SizeCtrls = true,
+    REG_Source_AspectCtrls = true,
+    REG_Source_DepthCtrls = true,
+    REG_TimeVariant = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false,
+})
+
+MLAAParams = [[
+    int srcDoD[2];
+    int srcCompOrder;
+    int size;
+    float threshold;
+    bool showEdges;
+]]
+
+MLAAEdgesParams = [[
+    int srcSize[2];
+    float threshold;
+]]
+
+MLAAEdgesKernel = [[
+
+    // Set the number of bits to use when storing the horizontal and vertical counts
+    // This number should be half the number of bits in the color channels used
+    // E.g. with a RT format of DXGI_R8G8_int this number should be 8/2 = 4
+    // Longer edges can be detected by increasing this number; however this requires a 
+    // larger bit depth format, and also makes the edge length detection function slower
+    const uint kNumCountBits = 4u;
+
+    // The maximum edge length that can be detected
+    const uint kMaxEdgeLength = ((1u << (kNumCountBits - 1u)) - 1u);
+
+    const uint kUpperMask = (1u << 0u);
+    const uint kRightMask = (1u << 1u);
+    const uint kStopBit = (1u << (kNumCountBits - 1u));
+    const uint kNegCountShift = (kNumCountBits);
+    const uint kCountShiftMask = ((1u << kNumCountBits) - 1u);
+
+    const float kZero[3] = {0, 0, 0};
+    const float kUp[3] = {0, -1, 0};
+    const float kDown[3] = {0, 1, 0};
+    const float kRight[3] = {1, 0, 0};
+    const float kLeft[3] = {-1, 0, 0};
+
+    __DEVICE__ uint D3DX_FLOAT_to_UINT(float _V, float _Scale) { return uint(_floorf(_V * _Scale + 0.5f)); }
+
+    __DEVICE__ float4 UINT4_to_FLOAT4_D3DX_B8G8R8A8_UNORM(float4 Input)
+    {
+        float4 Output;
+        Output.z = float(uint(Input.x) & 0x000000ffu) / 255.f;
+        Output.y = float(uint(Input.y) & 0x000000ffu) / 255.f;
+        Output.x = float(uint(Input.z) & 0x000000ffu) / 255.f;
+        Output.w = float(uint(Input.w) & 0x000000ffu) / 255.f;
+        return Output;
+    }
+
+    __DEVICE__ bool CompareColors(float a, float b, float threshold)
+    {
+        return (_fabs(a - b) > threshold);
+    }
+
+    __DEVICE__ float2 CompareColors2(float2 a, float2 b, float threshold)
+    {
+        return to_float2(_fabs(a.x - b.x) > threshold, _fabs(a.y - b.y) > threshold);
+    }
+
+    __DEVICE__ uint EncodeCount(uint negCount, uint posCount)
+    {
+        return ((negCount & kCountShiftMask) << kNegCountShift) | (posCount & kCountShiftMask);
+    }
+
+    __DEVICE__ float2 clamp2f(float2 v, float2 min, float2 max)
+    {
+        return to_float2(_clampf(v.x, min.x, max.x), _clampf(v.y, min.y, max.y));
+    }
+
+    __DEVICE__ float luminance(float4 col) {
+        return _sqrtf(dot(to_float3(col.x, col.y, col.z), to_float3(.299f, .587f, .114f)));
+    }
+
+    __DEVICE__ uint MLAA_SeparatingLines(__TEXTURE2D__ sampler, float2 offset, float2 textureSize, float threshold)
+    {
+        float lumResult = luminance(_tex2DVec4(sampler, _clampf(offset.x, 0, textureSize.x), _clampf(offset.y, 0, textureSize.y)));
+        float2 center = to_float2_s(lumResult);
+        float2 upright;
+
+        upright.y = luminance(_tex2DVec4(sampler, _clampf(offset.x + kUp[0], 0, textureSize.x), _clampf(offset.y + kUp[1], 0, textureSize.y)));
+        upright.x = luminance(_tex2DVec4(sampler, _clampf(offset.x + kRight[0], 0, textureSize.x), _clampf(offset.y + kRight[1], 0, textureSize.y)));
+
+        uint rVal = 0;
+
+        float2 result = CompareColors2(center, upright, threshold);
+        if (result.y)
+            rVal |= kUpperMask;
+        if (result.x)
+            rVal |= kRightMask;
+
+        return rVal;
+    }
+    
+    __DEVICE__ float2 MLAA_ComputeLineLength(__TEXTURE2D__ sampler, float2 offset, float2 textureSize, float threshold)
+    {
+        // Retrieve edge mask for current pixel	
+        uint pixel = MLAA_SeparatingLines(sampler, offset, textureSize, threshold);
+        float4 EdgeCount = to_float4(0, 0, 0, 0); // x = Horizontal Count Negative, y = Horizontal Count Positive, z = Vertical Count Negative, w = Vertical Count Positive				    
+
+        // We use a single branch for vertical and horizontal edge testing
+        // Doing this is faster than two different branches (one for vertical, one for horizontal)
+        // In most case both V and H edges are spatially coherent (apart from purely horizontal or 
+        // vertical edges but those don't happen often compared to other cases).				
+        
+        if ((pixel & (kUpperMask | kRightMask)) != 0u)
+        {
+            float4 EdgeDirMask = to_float4(kUpperMask, kUpperMask, kRightMask, kRightMask);
+            float4 EdgeFound;
+            EdgeFound.x = (pixel & uint(EdgeDirMask.x)) != 0u ? 0xFFFFFFFFu : 0u;
+            EdgeFound.y = (pixel & uint(EdgeDirMask.y)) != 0u ? 0xFFFFFFFFu : 0u;
+            EdgeFound.z = (pixel & uint(EdgeDirMask.z)) != 0u ? 0xFFFFFFFFu : 0u;
+            EdgeFound.w = (pixel & uint(EdgeDirMask.w)) != 0u ? 0xFFFFFFFFu : 0u;
+            
+            // Nullify the stopbit if we're not supposed to look at this edge
+            float4 StopBit;
+            StopBit.x = (uint(EdgeFound.x) != 0u) ? kStopBit : 0u;
+            StopBit.y = (uint(EdgeFound.y) != 0u) ? kStopBit : 0u;
+            StopBit.z = (uint(EdgeFound.z) != 0u) ? kStopBit : 0u;
+            StopBit.w = (uint(EdgeFound.w) != 0u) ? kStopBit : 0u;
+
+            for (int i = 1; i <= int(kMaxEdgeLength); i++)
+            {
+                float4 uEdgeMask;
+
+                uEdgeMask.x = MLAA_SeparatingLines(sampler, clamp2f(offset + to_float2(-i, 0), to_float2(0, 0), textureSize), textureSize, threshold);
+                uEdgeMask.y = MLAA_SeparatingLines(sampler, clamp2f(offset + to_float2(i, 0), to_float2(0, 0), textureSize), textureSize, threshold);
+                uEdgeMask.z = MLAA_SeparatingLines(sampler, clamp2f(offset + to_float2(0, i), to_float2(0, 0), textureSize), textureSize, threshold);
+                uEdgeMask.w = MLAA_SeparatingLines(sampler, clamp2f(offset + to_float2(0, -i), to_float2(0, 0), textureSize), textureSize, threshold);
+
+                // originally: EdgeFound = EdgeFound & (uEdgeMask & EdgeDirMask)
+                EdgeFound.x = uint(EdgeFound.x) & (uint(uEdgeMask.x) & uint(EdgeDirMask.x));
+                EdgeFound.y = uint(EdgeFound.y) & (uint(uEdgeMask.y) & uint(EdgeDirMask.y));
+                EdgeFound.z = uint(EdgeFound.z) & (uint(uEdgeMask.z) & uint(EdgeDirMask.z));
+                EdgeFound.w = uint(EdgeFound.w) & (uint(uEdgeMask.w) & uint(EdgeDirMask.w));
+
+                EdgeCount.x = uint(EdgeFound.x) != 0u ? uint(EdgeCount.x + 1u) : uint(EdgeCount.x) | uint(StopBit.x);
+                EdgeCount.y = uint(EdgeFound.y) != 0u ? uint(EdgeCount.y + 1u) : uint(EdgeCount.y) | uint(StopBit.y);
+                EdgeCount.z = uint(EdgeFound.z) != 0u ? uint(EdgeCount.z + 1u) : uint(EdgeCount.z) | uint(StopBit.z);
+                EdgeCount.w = uint(EdgeFound.w) != 0u ? uint(EdgeCount.w + 1u) : uint(EdgeCount.w) | uint(StopBit.w);
+            }
+        }
+        return to_float2(EncodeCount(EdgeCount.x, EdgeCount.y), EncodeCount(EdgeCount.z, EdgeCount.w));
+    }
+
+    __KERNEL__ void MLAAEdgesKernel(
+        __CONSTANTREF__ MLAAEdgesParams *params,
+        __TEXTURE2D__ src,
+        __TEXTURE2D_WRITE__ dst
+    )
+    {
+        DEFINE_KERNEL_ITERATORS_XY(x, y);
+        if (x < params->srcSize[0] && y < params->srcSize[1])
+        {
+            float2 fragCoord = to_float2(x,y) + to_float2_s(0.5f);
+            float2 iResolution = to_float2(params->srcSize[0], params->srcSize[1]);
+
+            float2 edges = MLAA_ComputeLineLength(src, fragCoord, iResolution - 1, params->threshold);
+
+            _tex2DVec4Write(dst, x, y, UINT4_to_FLOAT4_D3DX_B8G8R8A8_UNORM(to_float4(edges.x, edges.y, 0.0, 0.0)));
+        }
+    }
+]]
+
+MLAAKernel = [[
+    // Set the number of bits to use when storing the horizontal and vertical counts
+    // This number should be half the number of bits in the color channels used
+    // E.g. with a RT format of DXGI_R8G8_int this number should be 8/2 = 4
+    // Longer edges can be detected by increasing this number; however this requires a 
+    // larger bit depth format, and also makes the edge length detection function slower
+    const uint kNumCountBits = 4u;
+
+    // The maximum edge length that can be detected
+    const uint kMaxEdgeLength = ((1u << (kNumCountBits - 1u)) - 1u);
+
+    // const uint kUpperMask = (1u << 0u);
+    // const uint kUpperMask_BitPosition = 0u;
+    // const uint kRightMask = (1u << 1u);
+    // const uint kRightMask_BitPosition = 1u;
+    const uint kStopBit = (1u << (kNumCountBits - 1u));
+    const uint kStopBit_BitPosition = (kNumCountBits - 1u);
+    const uint kNegCountShift = (kNumCountBits);
+    const uint kPosCountShift = (00u);
+    const uint kCountShiftMask = ((1u << kNumCountBits) - 1u);
+
+    // const float kZero[3] = {0, 0, 0};
+    const float kUp[3] = {0, -1, 0};
+    // const float kDown[3] = {0, 1, 0};
+    const float kRight[3] = {1, 0, 0};
+    // const float kLeft[3] = {-1, 0, 0};
+
+    __DEVICE__ bool CompareColors(float a, float b, float threshold)
+    {
+        return (_fabs(a - b) > threshold);
+    }
+
+    __DEVICE__ float2 CompareColors2(float2 a, float2 b, float threshold)
+    {
+        return to_float2(_fabs(a.x - b.x) > threshold, _fabs(a.y - b.y) > threshold);
+    }
+
+    __DEVICE__ bool IsBitSet(uint Value, const uint uBitPosition)
+    {
+        return (((Value & (1u << uBitPosition)) > 0u) ? true : false);
+    }
+
+    __DEVICE__ uint RemoveStopBit(uint a)
+    {
+        return a & (kStopBit - 1u);
+    }
+
+    __DEVICE__ uint DecodeCountNoStopBit(uint count, uint shift)
+    {
+        return RemoveStopBit((count >> shift) & kCountShiftMask);
+    }
+
+    __DEVICE__ uint DecodeCount(uint count, uint shift)
+    {
+        return (count >> shift) & kCountShiftMask;
+    }
+    
+    __DEVICE__ uint D3DX_FLOAT_to_UINT(float _V, float _Scale) { return uint(floor(_V * _Scale + 0.5f)); }
+
+    __DEVICE__ float4 UINT4_to_FLOAT4_D3DX_B8G8R8A8_UNORM(float4 Input)
+    {
+        float4 Output;
+        Output.z = float(uint(Input.x) & 0x000000ffu) / 255.f;
+        Output.y = float(uint(Input.y) & 0x000000ffu) / 255.f;
+        Output.x = float(uint(Input.z) & 0x000000ffu) / 255.f;
+        Output.w = float(uint(Input.w) & 0x000000ffu) / 255.f;
+        return Output;
+    }
+
+    __DEVICE__ float4 D3DX_FLOAT4_to_UINT4_B8G8R8A8_UNORM(float4 Input)
+    {
+        float4 Output;
+        Output = to_float4(D3DX_FLOAT_to_UINT(_clampf(Input.z, 0.f, 1.f), 255.f),
+            D3DX_FLOAT_to_UINT(_clampf(Input.y, 0.f, 1.f), 255.f),
+            D3DX_FLOAT_to_UINT(_clampf(Input.x, 0.f, 1.f), 255.f),
+            D3DX_FLOAT_to_UINT(_clampf(Input.w, 0.f, 1.f), 255.f));
+        return Output;
+    }
+
+    __DEVICE__ float3 sqrt3f(float3 v)
+    {
+        return to_float3(_sqrtf(v.x), _sqrtf(v.y), _sqrtf(v.z));
+    }
+
+    __DEVICE__ float luminance(float4 col) {
+        return _sqrtf(dot(to_float3(col.x, col.y, col.z), to_float3(.299f, .587f, .114f)));
+    }
+    
+    __DEVICE__ float4 BlendColor(__TEXTURE2D__ sampler,
+        uint count,
+        float2 pos,
+        float2 dir,
+        float2 ortho,
+        bool _inverse,
+        float threshold,
+        float4 color)
+    {
+        // Only process pixel edge if it contains a stop bit
+        if (IsBitSet(count, kStopBit_BitPosition + kPosCountShift) || IsBitSet(count, kStopBit_BitPosition + kNegCountShift))
+        {
+            // Retrieve edge length
+            uint negCount = DecodeCountNoStopBit(count, kNegCountShift);
+            uint posCount = DecodeCountNoStopBit(count, kPosCountShift);
+
+            // Fetch color adjacent to the edge
+            float2 point = pos + dir;
+            float4 adjacentcolor = _tex2DVec4(sampler, point.x, point.y);
+
+            if ((negCount + posCount) == 0u)
+            {
+                float weight = 1.0 / 8.0; // Arbitrary			
+                // Cheap approximation of gamma to linear and then back again
+                float3 color3 = to_float3(color.x, color.y, color.z);
+                float3 adjcolor3 = to_float3(adjacentcolor.x, adjacentcolor.y, adjacentcolor.z);
+                float3 sqrtResult = sqrt3f(_mix(color3 * color3, adjcolor3 * adjcolor3, weight));
+                color.x = sqrtResult.x;
+                color.y = sqrtResult.y;
+                color.z = sqrtResult.z;
+                return color;
+            }
+            else
+            {
+                // If no sign bit is found on either edge then artificially increase the edge length so that
+                // we don't start anti-aliasing pixels for which we don't have valid data.
+                if (!(IsBitSet(count, (kStopBit_BitPosition + kPosCountShift)))) posCount = kMaxEdgeLength + 1u;
+                if (!(IsBitSet(count, (kStopBit_BitPosition + kNegCountShift)))) negCount = kMaxEdgeLength + 1u;
+
+                // Calculate some variables
+                float _length = float(negCount + posCount) + 1.f;
+                float midPoint = _length / 2.f;
+                float _distance = float(negCount);
+
+                const uint upperU = 0x00u;
+                const uint risingZ = 0x01u;
+                const uint fallingZ = 0x02u;
+                const uint lowerU = 0x03u;
+
+                ///////////////////////////////////////////////////////////////////////////////////////
+                // Determining what pixels to blend
+                // 4 possible values for shape - x indicates a blended pixel:
+                //
+                // 0: |xxxxxx| -> (h0 > 0) && (h1 > 0) : upperU     - blend along the entire inverse edge
+                //     ------
+                //
+                //
+                // 1:     xxx| -> (h0 < 0) && (h1 > 0) : risingZ    - blend first half on inverse, 
+                //     ------                                         blend second half on non-inverse
+                //    |xxx                                            
+                //
+                // 2: |xxx     -> (h0 > 0) && (h1 < 0) : fallingZ   - blend first half on non-inverse, 
+                //     ------                                         blend second half on inverse
+                //        xxx|                                        
+                //
+                // 3:          -> (h0 < 0) && (h1 < 0) : lowerU     - blend along the entire non-inverse edge
+                //     ------
+                //    |xxxxxx|
+                ///////////////////////////////////////////////////////////////////////////////////////
+
+                uint shape = 0x00u;
+                float4 col1;
+                float4 col2;
+                float2 point1;
+                float2 point2;
+
+                point1 = pos - (ortho * to_float2_s(int(negCount)));
+                point2 = pos - (ortho * (to_float2_s(int(negCount) + 1)));
+                col1 = _tex2DVec4(sampler, point1.x, point1.y);
+                col2 = _tex2DVec4(sampler, point2.x, point2.y);
+                if (CompareColors(luminance(col1), luminance(col2), threshold))
+                {
+                    shape |= risingZ;
+                }
+
+                point1 = pos + (ortho * to_float2_s(int(posCount)));
+                point2 = pos + (ortho * (to_float2_s(int(posCount) + 1)));
+                col1 = _tex2DVec4(sampler, point1.x, point1.y);
+                col2 = _tex2DVec4(sampler, point2.x, point2.y);
+                if (CompareColors(luminance(col1), luminance(col2), threshold))
+                {
+                    shape |= fallingZ;
+                }
+
+                // Parameter "_inverse" is hard-coded on call so will not generate a dynamic branch condition
+                if ((_inverse && (((shape == fallingZ) && (float(negCount) <= midPoint)) ||
+                    ((shape == risingZ) && (float(negCount) >= midPoint)) ||
+                    ((shape == upperU))))
+                    || (!_inverse && (((shape == fallingZ) && (float(negCount) >= midPoint)) ||
+                        ((shape == risingZ) && (float(negCount) <= midPoint)) ||
+                        ((shape == lowerU)))))
+                {
+                    float h0 = _fabs((1.0 / _length) * (_length - _distance) - 0.5f);
+                    float h1 = _fabs((1.0 / _length) * (_length - _distance - 1.0) - 0.5f);
+                    float area = 0.5f * (h0 + h1);
+                    // Cheap approximation of gamma to linear and then back again
+                    float3 color3 = to_float3(color.x, color.y, color.z);
+                    float3 adjcolor3 = to_float3(adjacentcolor.x, adjacentcolor.y, adjacentcolor.z);
+                    float3 colorMix = sqrt3f(_mix(color3 * color3, adjcolor3 * adjcolor3, area));
+                    color.x = colorMix.x; 
+                    color.y = colorMix.y; 
+                    color.z = colorMix.z; 
+                }
+                return color;
+            }
+        }
+    }
+    
+    __DEVICE__ float4 MLAA_BlendColor_PS(__TEXTURE2D__ sampler, __TEXTURE2D__ samplerEdges, float2 offset, float threshold, bool showEdges)
+    {
+        if (showEdges)
+        {
+            float4 rVal = _tex2DVec4(sampler, offset.x, offset.y);
+
+            uint hcount, vcount;
+            float4 _count = D3DX_FLOAT4_to_UINT4_B8G8R8A8_UNORM(_tex2DVec4(samplerEdges, offset.x, offset.y));
+            hcount = _count.x; vcount = _count.y;
+
+            if ((hcount != 0u) || (vcount != 0u))
+            {
+                if ((IsBitSet(hcount, kStopBit_BitPosition + kPosCountShift) || IsBitSet(hcount, kStopBit_BitPosition + kNegCountShift)) ||
+                    (IsBitSet(vcount, kStopBit_BitPosition + kPosCountShift) || IsBitSet(vcount, kStopBit_BitPosition + kNegCountShift)))
+                {
+                    uint Count = 0u;
+                    Count += DecodeCountNoStopBit(hcount, kNegCountShift);
+                    Count += DecodeCountNoStopBit(hcount, kPosCountShift);
+                    Count += DecodeCountNoStopBit(vcount, kNegCountShift);
+                    Count += DecodeCountNoStopBit(vcount, kPosCountShift);
+                    if (Count != 0u)
+                        rVal = to_float4(1, 0, 0, 1);
+                }
+            }
+            return rVal;
+        }
+        else
+        {
+            uint hcount, vcount;
+            uint hcountup, vcountright;
+
+            float2 kUpVec = to_float2(kUp[0], kUp[1]);
+            float2 kRightVec = to_float2(kRight[0], kRight[1]);
+
+            float4 _count = D3DX_FLOAT4_to_UINT4_B8G8R8A8_UNORM(_tex2DVec4(samplerEdges, offset.x, offset.y));
+            hcount = _count.x; vcount = _count.y;
+
+            _count = D3DX_FLOAT4_to_UINT4_B8G8R8A8_UNORM(_tex2DVec4(samplerEdges, offset.x - kUpVec.x, offset.y - kUpVec.y));
+            hcountup = _count.x;
+
+            _count = D3DX_FLOAT4_to_UINT4_B8G8R8A8_UNORM(_tex2DVec4(samplerEdges, offset.x - kRightVec.x, offset.y - kRightVec.y));
+            vcountright = _count.y;
+            
+            // Retrieve pixel from original image
+            float4 rVal = _tex2DVec4(sampler, offset.x, offset.y);
+            // Blend pixel colors as required for anti-aliasing edges
+            if (hcount != 0u)		
+                rVal = BlendColor(sampler, hcount, offset, kUpVec, kRightVec, false, threshold, rVal);   // H down-up
+            if (hcountup != 0u)	    
+                rVal = BlendColor(sampler, hcountup, offset - kUpVec, -kUpVec, kRightVec, true, threshold, rVal);   // H up-down    				    
+            if (vcount != 0u)		
+                rVal = BlendColor(sampler, vcount, offset, kRightVec, kUpVec, false, threshold, rVal);   // V left-right				
+            if (vcountright != 0u)	
+                rVal = BlendColor(sampler, vcountright, offset - kRightVec, -kRightVec, kUpVec, true, threshold, rVal);   // V right-left    			
+
+            return rVal;
+        }
+    }
+
+    __KERNEL__ void MLAAKernel(
+        __CONSTANTREF__ MLAAParams *params,
+        __TEXTURE2D__ src,
+        __TEXTURE2D__ edges,
+        __TEXTURE2D_WRITE__ dst
+    )
+    {
+        DEFINE_KERNEL_ITERATORS_XY(x, y);
+        if (x < params->srcDoD[0] && y < params->srcDoD[1])
+        {
+            float2 fragCoord = to_float2(x,y) + to_float2_s(0.5f);
+
+            float4 mlaa = MLAA_BlendColor_PS(src, edges, fragCoord, params->threshold, params->showEdges);
+
+            _tex2DVec4Write(dst, x, y, mlaa);
+        }
+    }
+]]
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image",
+        LINK_Main = 1,
+        INP_AcceptsGPUImages = true,
+    })
+
+    InThreshold = self:AddInput("Threshold", "Threshold", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "SliderControl",
+        INP_Default = 0.04025,
+    })
+    InShowEdges = self:AddInput("ShowEdges", "ShowEdges", {
+        LINKID_DataType = "Number",
+        INP_Integer = true,
+        INPID_InputControl = "CheckboxControl",
+        INP_Default = 0.0,
+    })
+
+
+    OutImage = self:AddOutput("Output", "Output", {
+        LINKID_DataType = "Image",
+        LINK_Main = 1,
+        IMG_DeferAlloc = true
+    })
+
+
+    
+
+end
+
+function PrecalcProcess(req)
+    local src = InImage:GetValue(req)
+
+    local dod = req:GetInputDoD(InImage)
+    local datawnd = dod:Intersect(src.DataWindow)
+
+    local out = Image({
+        IMG_Like = src,               
+        IMG_NoData = true,
+        IMG_DataWindow = datawnd
+    })
+
+    OutImage:Set(req, out)
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    local dod = req:GetInputDoD(InImage)
+    local datawnd = dod:Intersect(src.DataWindow)
+
+    local edges = Image({
+        IMG_Like = src, 
+        IMG_Depth = src.Depth < 7 and 7 or src.Depth, 
+        IMG_DataWindow = datawnd
+    })
+    local dst = Image({
+        IMG_Like = src, 
+        IMG_Depth = src.Depth < 7 and 7 or src.Depth, 
+        IMG_DataWindow = datawnd
+    })
+    if not req:IsPreCalc() then
+        local nodeMLAAEdges = DVIPComputeNode(req, "MLAAEdgesKernel", MLAAEdgesKernel, "MLAAEdgesParams", MLAAEdgesParams)
+    
+        local params = nodeMLAAEdges:GetParamBlock(MLAAEdgesParams)
+        params.srcSize[0] = src.DataWindow:Width()
+        params.srcSize[1] = src.DataWindow:Height()
+        params.threshold = InThreshold:GetValue(req).Value
+
+        nodeMLAAEdges:SetParamBlock(params)
+
+        nodeMLAAEdges:AddSampler("RowSampler", TEX_FILTER_MODE_LINEAR,TEX_ADDRESS_MODE_BORDER, TEX_NORMALIZED_COORDS_FALSE)
+        
+        nodeMLAAEdges:AddInput("src", src)
+        nodeMLAAEdges:AddOutput("dst", edges)
+
+        local okEdges = nodeMLAAEdges:RunSession(req)
+
+        if okEdges then
+            local nodeMLAA = DVIPComputeNode(req, "MLAAKernel", MLAAKernel, "MLAAParams", MLAAParams)
+    
+            local params = nodeMLAA:GetParamBlock(MLAAParams)
+            params.srcDoD[0] = src.DataWindow:Width()
+            params.srcDoD[1] = src.DataWindow:Height()
+            params.threshold = InThreshold:GetValue(req).Value
+            params.showEdges = InShowEdges:GetValue(req).Value == 1
+
+            nodeMLAA:SetParamBlock(params)
+
+            nodeMLAA:AddSampler("RowSampler", TEX_FILTER_MODE_LINEAR,TEX_ADDRESS_MODE_BORDER, TEX_NORMALIZED_COORDS_FALSE)
+            nodeMLAA:AddSampler("EdgeSampler", TEX_FILTER_MODE_LINEAR,TEX_ADDRESS_MODE_BORDER, TEX_NORMALIZED_COORDS_FALSE)
+
+            nodeMLAA:AddInput("src", src)
+            nodeMLAA:AddInput("edges", edges)
+            nodeMLAA:AddOutput("dst", dst)
+
+            local ok = nodeMLAA:RunSession(req)
+
+            if not ok then
+                dst = nil
+                dump(nodeMLAA:GetErrorLog())
+            end
+        else
+            edges = nil
+            dst = nil
+            dump(nodeMLAAEdges:GetErrorLog())
+        end
+    end
+
+
+    OutImage:Set(req, dst)
+end
