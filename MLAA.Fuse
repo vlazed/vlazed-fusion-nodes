@@ -470,21 +470,22 @@ function Create()
         INP_AcceptsGPUImages = true,
     })
 
-    InNumCountBits = self:AddInput("Image half bit depth", "NumCountBits", {
+    InNumCountBits = self:AddInput("Image color depth", "NumCountBits", {
         LINKID_DataType = "Number",
         INP_Integer = true,
         INPID_InputControl = "SliderControl",
-        INP_Min = 2,
-        INP_Max = 16,
-        INP_Default = 4,
-        INPS_StatusText = "Number of bits to use when storing the horizontal and vertical counts. This number should be half the number of bits in the color channels used. Longer edges can be detected by increasing this number; however this requires a larger bit depth format, and also slows the edge length detection function.",
+        INP_MinAllowed = 2,
+        INP_MinScale = 2,
+        INP_MaxScale = 16,
+        INP_Default = 8,
+        INPS_StatusText = "Bit depth of each pixel in a color channel. Longer edges can be detected by increasing this number; however this requires a larger bit depth, and also slows the edge length detection function.",
     })
     InThreshold = self:AddInput("Threshold", "Threshold", {
         LINKID_DataType = "Number",
         INPID_InputControl = "SliderControl",
         INP_Default = 0.04025,
         INPS_StatusText = "Threshold for color difference to detect edges.",
-        INP_Min = 0.0,
+        INP_MinAllowed = 0.0,
     })
     InShowEdges = self:AddInput("Show Edges", "ShowEdges", {
         LINKID_DataType = "Number",
@@ -537,13 +538,14 @@ function Process(req)
         IMG_DataWindow = datawnd
     })
     if not req:IsPreCalc() then
+        local bitDepth = math.floor(InNumCountBits:GetValue(req).Value * 0.5)
         local nodeMLAAEdges = DVIPComputeNode(req, "MLAAEdgesKernel", MLAAEdgesKernel, "MLAAEdgesParams", MLAAEdgesParams)
     
         local params = nodeMLAAEdges:GetParamBlock(MLAAEdgesParams)
         params.srcSize[0] = src.DataWindow:Width()
         params.srcSize[1] = src.DataWindow:Height()
         params.threshold = InThreshold:GetValue(req).Value
-        params.numCountBits = InNumCountBits:GetValue(req).Value
+        params.numCountBits = bitDepth
 
         nodeMLAAEdges:SetParamBlock(params)
 
@@ -562,7 +564,7 @@ function Process(req)
             params.srcDoD[1] = src.DataWindow:Height()
             params.threshold = InThreshold:GetValue(req).Value
             params.showEdges = InShowEdges:GetValue(req).Value == 1
-            params.numCountBits = InNumCountBits:GetValue(req).Value
+            params.numCountBits = bitDepth
 
             nodeMLAA:SetParamBlock(params)
 
