@@ -25,8 +25,9 @@ I consider myself a beginner in programming DCTL kernels. Because of some limita
 
 ## MLAA.Fuse 
 
-|![mlaa comparison](media/mlaa_comparison.gif)|
+|MLAA Demo|
 |:------------------------------:|
+|![mlaa comparison](media/mlaa_comparison.gif)|
 | More layers of MLAA blurs the entire result, but it reduces aliasing on rimlighting on the head |
 
 This applies morphological anti-aliasing (as seen [here](https://github.com/GPUOpen-LibrariesAndSDKs/MLAA11/blob/master/mlaa11/src/Shaders/MLAA11.hlsl). This node actually translates this [GLSL shader toy](https://www.shadertoy.com/view/cllXRB), which is relatively simpler)
@@ -35,12 +36,13 @@ Click [here](#anti-aliasing-comparison) to see a comparison of anti-aliasing nod
 
 ## SMAA.Fuse (Windows only)
 
-|![smaa comparison](media/smaa_comparison.gif)|
+|SMAA Demo|
 |:------------------------------:|
+|![smaa comparison](media/smaa_comparison.gif)|
 | More layers of SMAA reduces the aliasing more. THe shoulder appears more jagged, however |
 
 > [!WARNING] 
-> This fuse is confirmed to work for Windows. However, it is unlikely to work on Mac or Linux due to an issue with storing the area look-up texture in the __CONSTANT__ address space.
+> This fuse is confirmed to work for Windows. However, it is unlikely to work on Mac or Linux due to an issue with storing the area look-up texture in the `__CONSTANT__` address space.
 
 This applies [submorphological anti-aliasing (SMAA)](https://www.iryoku.com/smaa/). This node translate this [HLSL shader](https://github.com/iryoku/smaa/blob/master/SMAA.hlsl).
 
@@ -50,7 +52,7 @@ Click [here](#anti-aliasing-comparison) to see a comparison of anti-aliasing nod
 
 ![smaa setup](media/smaa-setup.png)
 
-The SMAA node relies on an Area and Search node to inform its algorithm. 
+The SMAA node relies on an Area and Search node to inform its algorithm. You can make a macro that groups these three nodes together while exposing significant parameters.
 
 ## Appendix
 
@@ -59,14 +61,15 @@ The SMAA node relies on an Area and Search node to inform its algorithm.
 > [!NOTE] 
 > These double on anti-aliasing nodes to make it more noticeable.
 
-|![smaa comparison](media/smaa_head_none0000.png)|![smaa comparison](media/smaa_header0000.png)|![smaa comparison](media/mlaa_header0000.png)|
-|:------------------------------:|:------------------------------:|:------------------------------:|
-| None | SMAA | MLAA |
+|Image|![smaa comparison](media/smaa_head_none0000.png)|![smaa comparison](media/smaa_header0000.png)|![smaa comparison](media/mlaa_header0000.png)|
+|:-:|:------------------------------:|:------------------------------:|:------------------------------:|
+| **Description** | None | SMAA | MLAA |
 
-|![smaa comparison](media/smaa_full_none0000.png)|![smaa comparison](media/smaa_bodyer0000.png)|![smaa comparison](media/mlaa_bodyer0000.png)|
-|:------------------------------:|:------------------------------:|:------------------------------:|
-| None | SMAA | MLAA |
+|Image|![smaa comparison](media/smaa_full_none0000.png)|![smaa comparison](media/smaa_bodyer0000.png)|![smaa comparison](media/mlaa_bodyer0000.png)|
+|:-:|:------------------------------:|:------------------------------:|:------------------------------:|
+|**Description**| None | SMAA | MLAA |
 
+| No AA vs SMAA vs MLAA |
+|:-:|
 |![smaa vs mlaa](media/smaa_vs_mlaa.gif)|
-|:------------------------------:|
-| No AA vs SMAA vs MLAA; each significantly reduces aliasing. |
+| Both nodes significantly reduces aliasing. |
