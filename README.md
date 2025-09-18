@@ -39,7 +39,8 @@ Click [here](#anti-aliasing-comparison) to see a comparison of anti-aliasing nod
 |:------------------------------:|
 | More layers of SMAA reduces the aliasing more. THe shoulder appears more jagged, however |
 
-> [!WARNING] This fuse is confirmed to work for Windows. However, it is unlikely to work on Mac or Linux due to an issue with storing the area look-up texture in the __CONSTANT__ address space.
+> [!WARNING] 
+> This fuse is confirmed to work for Windows. However, it is unlikely to work on Mac or Linux due to an issue with storing the area look-up texture in the __CONSTANT__ address space.
 
 This applies [submorphological anti-aliasing (SMAA)](https://www.iryoku.com/smaa/). This node translate this [HLSL shader](https://github.com/iryoku/smaa/blob/master/SMAA.hlsl).
 
@@ -55,7 +56,8 @@ The SMAA node relies on an Area and Search node to inform its algorithm.
 
 ### Anti-aliasing Comparison
 
-> [!NOTE] These double on anti-aliasing nodes to make it more noticeable.
+> [!NOTE] 
+> These double on anti-aliasing nodes to make it more noticeable.
 
 |![smaa comparison](media/smaa_head_none0000.png)|![smaa comparison](media/smaa_header0000.png)|![smaa comparison](media/mlaa_header0000.png)|
 |:------------------------------:|:------------------------------:|:------------------------------:|
@@ -64,3 +66,7 @@ The SMAA node relies on an Area and Search node to inform its algorithm.
 |![smaa comparison](media/smaa_full_none0000.png)|![smaa comparison](media/smaa_bodyer0000.png)|![smaa comparison](media/mlaa_bodyer0000.png)|
 |:------------------------------:|:------------------------------:|:------------------------------:|
 | None | SMAA | MLAA |
+
+|![smaa vs mlaa](media/smaa_vs_mlaa.gif)|
+|:------------------------------:|
+| No AA vs SMAA vs MLAA; each significantly reduces aliasing. |
